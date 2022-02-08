@@ -1,0 +1,61 @@
+######################################################################
+# Created by: Rahul Kumar
+# Created On: 31 Jan 2022
+# Python Version: 3.8.8
+# requests 2.25.1
+# pandas 1.2.4
+# sqlalchemy 1.4.7
+# snowflake-connector-python 2.6.2 , snowflake 0.0.3, snowflake-sqlalchemy 1.3.2
+#Note: Please change the account, warehouse and database for snowflake connection.
+###################################################################################################
+
+
+import requests
+import pandas as pd
+from sqlalchemy import create_engine
+import hashlib
+
+# Request to pull user Data
+try:
+    response_API_USERS = requests.get('https://619ca0ea68ebaa001753c9b0.mockapi.io/evaluation/dataengineer/jr/v1/users')
+except requests.exceptions.HTTPError as err:
+    print(err )
+
+# Request to pull message Data
+try:
+    response_API_MESSAGES = requests.get('https://619ca0ea68ebaa001753c9b0.mockapi.io/evaluation/dataengineer/jr/v1/messages')
+except requests.exceptions.HTTPError as err:
+    print(err )
+
+# Normalize the json data
+df_user_raw = pd.json_normalize(response_API_USERS.json(),max_level=1)
+
+
+#User dataframe with only latest record for an id based on updatedAt
+#Separating domain from email
+#hexdigest fro address and last name
+df_user_with_dup = df_user_raw[["id","email","birthDate","profile.gender","profile.isSmoking","profile.profession","profile.income","firstName","lastName","address","city","country","zipCode","createdAt","updatedAt"]]
+df_user = df_user_with_dup.sort_values('updatedAt').groupby('id').apply(lambda x: x.tail(1))
+df_user['email'] = df_user['email'].apply(lambda x: x.split('@')[1])
+df_user['lastName'] = df_user['lastName'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+df_user['address'] = df_user['address'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+
+
+# subscription dataframe with normalized data and id column
+df_subscription = pd.json_normalize(response_API_USERS.json(), record_path=['subscription'],meta= ['id'])
+
+# message dataframe without message column
+df_messages_all = pd.json_normalize(response_API_MESSAGES.json(),max_level=1) 
+df_messages = df_messages_all[["createdAt","receiverId","senderId","id"]]
+
+#Snowflake connector
+engine = create_engine('snowflake://{user}:{password}@{account}/{database}/{schema}?warehouse={warehouse}'.format( user='PYTHON_USER',password='Simpli@123',
+    account='address.us-east-1', warehouse='WAREHOUSE_NAME', database='DATABASE_NAME', schema='PUBLIC'))
+connection = engine.connect()
+
+#Converting dataframe into snowflake physical table, table will be rebuild in every run
+df_user.to_sql('user', con = engine, if_exists = 'replace', index=False)
+df_subscription.to_sql('subscription', con = engine, if_exists = 'replace', index=False)
+df_messages.to_sql('messages', con = engine, if_exists = 'replace', index=False)
+
+connection.closed                    
